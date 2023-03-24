@@ -2,4 +2,4 @@
 WIP
 ---
 
-How to guide of installing Nextcloud on FreeBSD, Nginx, PostgreSQL, and PHP.
+How to guide for installing Nextcloud on FreeBSD, Nginx, PostgreSQL, and PHP.
