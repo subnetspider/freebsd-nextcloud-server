@@ -243,7 +243,7 @@ sudo mount -a
 
 **Insert the Nginx configuration**
 
-(I copied and modified the nginx configuration from Nexcloud's Adnmin guide and put in some lines from my TrueNAS CORE Nextcloud jail):
+(I copied and modified the nginx configuration from Nexcloud's Admin guide and put in some lines from my TrueNAS CORE Nextcloud jail, this still needs to be optimized.)
 
 ```shell
 sudo mv /usr/local/etc/nginx/nginx.conf /usr/local/etc/nginx/nginx.conf.orig
