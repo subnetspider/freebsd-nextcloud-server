@@ -1,0 +1,366 @@
+# Truenas Jail
+
+Jails - create
+  Name: nextcloud
+  Jail Type: Default
+  Release: 13.1
+  DHCP Autoconfiguration IPv4: yes
+Save, start and open jail shell
+
+## Base settings
+
+### Change root password
+
+  passwd
+
+### Create additional user (for ssh)
+
+  adduser USERNAME
+
+### Activate sshd and start
+
+  service sshd enable && service sshd start
+
+### Get IP address
+
+  ifconfig
+
+## Jail
+
+### Login into jail
+
+  ssh username@ipadresse bzw. hostname
+
+### Get root rights
+
+  su 
+
+### Modify package source  (/etc/pkg/FreeBSD.conf) 
+
+  mkdir -p /usr/local/etc/pkg/repos 
+  cp /etc/pkg/FreeBSD.conf /usr/local/etc/pkg/repos/FreeBSD.conf
+  sed -i '' 's/quarterly/latest/' /usr/local/etc/pkg/repos/FreeBSD.conf
+
+### Update package source
+
+  pkg update
+
+### Install packages
+
+  pkg install nextcloud-php81 postgresql13-server postgresql13-client nginx php81-pdo_pgsql php81-pgsql php81-pecl-redis redis
+
+### Activate services
+
+  service postgresql enable && service nginx enable && service php-fpm enable && service redis enable 
+
+## PostgreSQL
+
+### Initialize PostgreSQL and start
+
+  service postgresql initdb && service postgresql start
+
+### PostreSQL root password
+
+  su -m postgres -c "createuser -s root --pwprompt"
+
+### Create database for Nextcloud
+
+  Databasename = nextcloud
+  Databaseuser = nextcloud
+  Databasepassword = N3XtCloud!
+
+  su -m postgres -c "createuser -s nextcloud --pwprompt"
+  su -m postgres -c "createdb -O nextcloud -E Unicode -T template1 nextcloud"
+
+### Maintanance cronjob for PostgreSQL
+
+  mkdir /var/db/postgres/bin
+  ee /var/db/postgres/bin/vacuum.sh
+
+```bash
+cat > /var/db/postgres/bin/vacuum.sh << 'EOF'
+#! /bin/sh
+/usr/local/bin/vacuumdb -az 1> /dev/null 2> /dev/null
+/usr/local/bin/reindexdb -a 1> /dev/null 2> /dev/null
+'EOF'
+```
+
+  echo "# PostgreSQL house keeping" >> /etc/crontab
+  echo "0       0       *       *       *       postgres /var/db/postgres/bin/vacuum.sh" >> /etc/crontab
+
+## Redis
+
+### Modify Redis configuration
+
+  sed -i '' 's/port 6379/port 0/' /usr/local/etc/redis.conf
+  sed -i '' 's/# unixsocket \/run\/redis.sock/unixsocket \/var\/run\/redis\/redis.sock/' /usr/local/etc/redis.conf
+  sed -i '' 's/# unixsocketperm 700/unixsocketperm 770/' /usr/local/etc/redis.conf
+
+### Modify Redis user
+
+  pw groupmod redis -m www
+
+## NGINX
+
+### Create NGINX configuration
+
+  /usr/local/etc/nginx/nginx.conf = Global settings
+  /usr/local/etc/nginx/conf.d/php.conf = PHP config
+  /usr/local/etc/nginx/conf.d/nextcloud.conf = Nextcloud config
+
+  mkdir /usr/local/etc/nginx/conf.d
+
+```bash
+cat > /usr/local/etc/nginx/nginx.conf << 'EOF'
+worker_processes auto;
+error_log /var/log/nginx-error.log;
+
+events {
+ worker_connections 1024;
+ use kqueue;
+ multi_accept on;
+}
+
+http {
+ access_log /var/log/nginx/access.log;
+ include mime.types;
+ default_type application/octet-stream;
+
+ sendfile on;
+ tcp_nopush on;
+ tcp_nodelay on;
+ reset_timedout_connection on;
+ keepalive_timeout 65;
+ keepalive_requests 1000;
+ types_hash_max_size 2048;
+ send_timeout 30;
+ server_names_hash_max_size 4096;
+
+ client_header_timeout 180s;
+ client_body_temp_path /var/tmp/nginx/client_body_temp;
+
+ proxy_buffer_size 4k;
+ proxy_buffers 8 16k;
+ proxy_busy_buffers_size 64k;
+ proxy_temp_file_write_size 64k;
+ proxy_temp_path /var/tmp/nginx/proxy_temp;
+ proxy_cache_valid 1m;
+    
+ include /usr/local/etc/nginx/conf.d/*.conf;
+}
+'EOF'
+```
+
+```bash
+cat > /usr/local/etc/nginx/conf.d/php.conf << 'EOF'
+upstream php-handler {
+ server unix:/var/run/php-fpm.sock;
+}
+'EOF'
+```
+
+```bash
+cat > /usr/local/etc/nginx/conf.d/nextcloud.conf << 'EOF'
+server {
+ listen 80;
+ listen [::]:80;
+ server_tokens off;
+ root /usr/local/www/nextcloud/;
+ client_max_body_size 10G;
+ client_body_timeout 300s;
+ fastcgi_buffers 64 4K;
+ client_body_buffer_size 512k;
+
+ gzip on;
+ gzip_vary on;
+ gzip_comp_level 4;
+ gzip_min_length 256;
+ gzip_proxied expired no-cache no-store private no_last_modified no_etag auth;
+ gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/wasm application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
+
+ add_header Referrer-Policy "no-referrer" always;
+ add_header X-Content-Type-Options "nosniff" always;
+ add_header X-Download-Options "noopen" always;
+ add_header X-Frame-Options "SAMEORIGIN" always;
+ add_header X-Permitted-Cross-Domain-Policies "none" always;
+ add_header X-Robots-Tag "none" always;
+ add_header X-XSS-Protection "1; mode=block" always;
+ fastcgi_hide_header X-Powered-By;
+
+ index index.php index.html /index.php$request_uri;
+
+ if ( $http_user_agent ~ ^DavClnt ) {
+  return 302 /remote.php/webdav/$is_args$args;
+  }
+
+ location = /robots.txt {
+  allow all;
+  log_not_found off;
+  access_log off;
+ }
+
+ location ^~ /.well-known {
+  location = /.well-known/carddav { return 301 /remote.php/dav/; }
+  location = /.well-known/caldav { return 301 /remote.php/dav/; }
+  location /.well-known/acme-challenge { try_files $uri $uri/ =404; }
+  location /.well-known/pki-validation { try_files $uri $uri/ =404; }
+  return 301 /index.php$request_uri;
+ }
+  
+ location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/) { return 404; }
+ location ~ ^/(?:\.|autotest|occ|issue|indie|db_|console) { return 404; }
+ location ~ \.php(?:$|/) {
+  rewrite ^/(?!index|remote|public|cron|core\/ajax\/update|status|ocs\/v[12]|updater\/.+|oc[ms]-provider\/.+|.+\/richdocumentscode\/proxy) /index.php$request_uri;
+  fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+  set $path_info $fastcgi_path_info;
+  try_files $fastcgi_script_name =404;  
+  include fastcgi_params;
+  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+  fastcgi_param PATH_INFO $path_info;
+  fastcgi_param HTTPS on;
+  fastcgi_param modHeadersAvailable true;
+  fastcgi_param front_controller_active true;
+  fastcgi_pass php-handler;  
+  fastcgi_intercept_errors on;
+  fastcgi_request_buffering off;  
+  fastcgi_max_temp_file_size 0;
+ }
+
+ location ~ \.(?:css|js|svg|gif|png|jpg|ico|wasm|tflite|map)$ {
+  try_files $uri /index.php$request_uri;
+  add_header Cache-Control "public, max-age=15778463";
+  access_log off;    
+  location ~ \.wasm$ {
+  default_type application/wasm;
+  }
+ }
+
+ location ~ \.woff2?$ {
+  try_files $uri /index.php$request_uri;
+  expires 7d;
+  access_log off;
+ }
+
+ location /remote {
+  return 301 /remote.php$request_uri;
+ }
+
+ location / {
+  try_files $uri $uri/ /index.php$request_uri;
+ }
+}
+'EOF'
+```
+
+## PHP
+
+### Modify PHP configuration
+
+  cp /usr/local/etc/php.ini-production /usr/local/etc/php.ini
+
+  sed -i '' 's/\;date.timezone =/date.timezone = Europe\/Berlin/' /usr/local/etc/php.ini
+  sed -i '' 's/post_max_size = 8M/post_max_size = 16M/' /usr/local/etc/php.ini
+  sed -i '' 's/max_execution_time = 30/max_execution_time = 300/' /usr/local/etc/php.ini
+  sed -i '' 's/max_input_time = 60/max_input_time = 300/' /usr/local/etc/php.ini
+  sed -i '' 's/memory_limit = 128M/memory_limit = 512M/' /usr/local/etc/php.ini
+
+  sed -i '' 's/;opcache.enable=1/opcache.enable=1/' /usr/local/etc/php.ini
+  sed -i '' 's/;opcache.enable_cli=0/opcache.enable_cli=1/' /usr/local/etc/php.ini
+  sed -i '' 's/;opcache.memory_consumption=128/opcache.memory_consumption=128/' /usr/local/etc/php.ini
+  sed -i '' 's/;opcache.interned_strings_buffer=8/opcache.interned_strings_buffer=8/' /usr/local/etc/php.ini
+  sed -i '' 's/;opcache.max_accelerated_files=10000/opcache.max_accelerated_files=10000/' /usr/local/etc/php.ini
+  sed -i '' 's/;opcache.revalidate_freq=2/opcache.revalidate_freq=1/' /usr/local/etc/php.ini
+  sed -i '' 's/;opcache.save_comments=1/opcache.save_comments=1/' /usr/local/etc/php.ini
+
+  echo "; Redis ;" >> /usr/local/etc/php.ini
+  echo "redis.session.locking_enabled = 1" >> /usr/local/etc/php.ini
+  echo "redis.session.lock_retries = -1" >> /usr/local/etc/php.ini
+  echo "redis.session.lock_wait_time = 10000" >> /usr/local/etc/php.ini
+
+  cp /usr/local/etc/php-fpm.d/www.conf /usr/local/etc/php-fpm.d/www.conf.bak
+
+  sed -i '' 's/;listen.owner = www/listen.owner = www/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/;listen.group = www/listen.group = www/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/;listen.mode = 0660/listen.mode = 0660/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/listen = 127.0.0.1:9000/listen = \/var\/run\/php-fpm.sock/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/;env\[HOSTNAME\]/env\[HOSTNAME\]/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/;env\[PATH\]/env\[PATH\]/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/;env\[TMP\]/env\[TMP\]/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/;env\[TMPDIR\]/env\[TMPDIR\]/' /usr/local/etc/php-fpm.d/www.conf
+  sed -i '' 's/;env\[TEMP\]/env\[TEMP\]/' /usr/local/etc/php-fpm.d/www.conf
+
+## Start all services
+
+  service redis start && php-fpm start && service nginx start
+
+## Nextcloud
+
+### Prepare Nextcloud configuration
+
+```bash
+cat > /usr/local/www/nextcloud/config/config.php << 'EOF'
+<?php
+
+/** This is the bare minimum configuration for the bundled installer
+  * to function properly.
+  */
+
+$CONFIG = array (
+
+ 'overwriteprotocol' => 'http',
+
+/** The FreeBSD package separates apps into bundled apps and user-
+  * installed apps. If this 'apps_paths' array is missing from
+  * your config, your Nextcloud installation is broken
+  */
+  'apps_paths' =>
+  array (
+    0 =>
+    array (
+     'path' => '/usr/local/www/nextcloud/apps',
+     'url' => '/apps',
+     'writable' => true,
+    ),
+    1 =>
+    array (
+     'path' => '/usr/local/www/nextcloud/apps-pkg',
+     'url' => '/apps-pkg',
+     'writable' => false,
+    ),
+  ),
+
+// Log-files belong in the appropriate location
+ 'logfile' => '/var/log/nextcloud/nextcloud.log',
+
+// Enable user caching when option is enabled
+  'memcache.local' => '\OC\Memcache\APCu',
+
+// Redis caching and session handling
+ 'filelocking.enabled' => true,
+ 'memcache.local' => '\OC\Memcache\Redis',
+ 'memcache.locking' => '\OC\Memcache\Redis',
+ 'distributed' => '\\OC\\Memcache\\Redis',
+ 'redis' => 
+  array(
+   'host' => '/var/run/redis/redis.sock',
+   'port' => 0,
+   'timeout' => 0.0,
+  ),
+ );
+'EOF'
+```
+
+### Modify Nextcloud config permissions
+
+  chown www:www /usr/local/www/nextcloud/config/config.php 
+  chmod 775 /usr/local/www/nextcloud/config/config.php
+
+# Open Nextcloud installer
+
+http://nextcloud
+
+Adminaccount: nxadmin / PASSWORD
+Datenbankbenutzer = nextcloud
+Datenbankkennwort = N3XtCloud!
+Datenbankname = nextcloud
+Datenbankhost: localhost
